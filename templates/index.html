@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Transcript Generator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <span class="logo-icon">⌘</span>
+            <span>Shok's Magic Transcript</span>
+        </div>
+        <div class="header-controls">
+            <button id="theme-toggle" aria-label="Toggle dark mode">
+                <span class="theme-icon">☀️</span>
+            </button>
+        </div>
+    </header>
+
+    <main>
+        <div class="hero">
+            <h1>YouTube<br>Transcript<br>Generator</h1>
+        </div>
+
+        <div class="input-container">
+            <input type="text" id="youtube-url" placeholder="Enter YouTube URL">
+            <button id="transcribe-btn">→</button>
+        </div>
+
+        <div class="language-container" id="language-container">
+            <select id="language-select">
+                <option value="">Select Language</option>
+            </select>
+        </div>
+
+        <div class="loader" id="loader">
+            <div class="spinner"></div>
+            <p class="loader-text">Processing...</p>
+        </div>
+
+        <div class="result-section" id="result-section">
+            <div class="analysis-container">
+                <div class="section-header">
+                    <h2>AI Analysis</h2>
+                    <button id="copy-analysis-btn" class="copy-btn" aria-label="Copy analysis">
+                        <span class="copy-icon">⎘</span>
+                    </button>
+                </div>
+                <div class="analysis-content" id="analysis-content"></div>
+            </div>
+
+            <div class="transcript-container">
+                <div class="section-header">
+                    <h2>Raw Transcript</h2>
+                    <button id="copy-transcript-btn" class="copy-btn" aria-label="Copy transcript">
+                        <span class="copy-icon">⎘</span>
+                    </button>
+                </div>
+                <div class="transcript-content" id="transcript-content"></div>
+            </div>
+        </div>
+
+        <div class="error-message" id="error-message"></div>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
