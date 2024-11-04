@@ -46,3 +46,4 @@ For a complete list of dependencies, see `requirements.txt`.
 - YouTube transcript functionality
 - Static file handling (CSS/JS)
 - Template-based views using Jinja2
+# Magic-transcript
