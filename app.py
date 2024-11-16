@@ -81,6 +81,22 @@ def timeout(seconds):
         return wrapper
     return decorator
 
+def extract_video_id(url):
+    """Extract YouTube video ID from URL"""
+    # More comprehensive regex pattern
+    patterns = [
+        r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})',
+        r'(?:youtube\.com\/watch\?v=|youtu.be\/)([a-zA-Z0-9_-]{11})',
+        r'(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
+        r'(?:youtube\.com\/v\/)([a-zA-Z0-9_-]{11})'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
 def validate_youtube_url(url):
     """
     Validate YouTube URL format
@@ -91,23 +107,36 @@ def validate_youtube_url(url):
     Returns:
         bool: Whether URL is a valid YouTube URL
     """
-    try:
-        parsed_url = urlparse(url)
-        valid_domains = ['youtube.com', 'www.youtube.com', 'youtu.be']
-        
-        # Check domain
-        if parsed_url.netloc not in valid_domains:
-            return False
-        
-        # Check for video ID in different URL formats
-        if 'youtu.be' in parsed_url.netloc:
-            return bool(re.match(r'^/[a-zA-Z0-9_-]{11}$', parsed_url.path))
-        
-        # Check for video ID in standard YouTube URL
-        return bool(re.search(r'(v=|embed/|v/)[a-zA-Z0-9_-]{11}', url))
+    # More lenient validation
+    youtube_patterns = [
+        r'^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$',
+        r'^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/watch\?v=[a-zA-Z0-9_-]{11}',
+        r'^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/embed\/[a-zA-Z0-9_-]{11}',
+        r'^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/v\/[a-zA-Z0-9_-]{11}'
+    ]
     
-    except Exception:
-        return False
+    return any(re.match(pattern, url) for pattern in youtube_patterns)
+
+def check_video_availability(video_id):
+    """
+    Simplified video availability check
+    
+    Args:
+        video_id (str): YouTube video ID
+    
+    Returns:
+        tuple: (is_available, error_message)
+    """
+    try:
+        # Just check if we can retrieve a transcript
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        return True, None
+    except TranscriptsDisabled:
+        return False, "Transcripts are disabled for this video"
+    except NoTranscriptFound:
+        return False, "No transcript found for this video"
+    except Exception as e:
+        return False, f"Video availability check failed: {str(e)}"
 
 def configure_ai_service(service, api_key=None):
     """
@@ -218,20 +247,6 @@ Transcript:
         logger.error(f"Error in AI summarization: {str(e)}")
         return f"Error in AI summarization: {str(e)}"
 
-def extract_video_id(url):
-    """Extract YouTube video ID from URL"""
-    patterns = [
-        r'(?:youtube\.com\/watch\?v=|youtu.be\/)([^&\n?]*)',
-        r'(?:youtube\.com\/embed\/)([^&\n?]*)',
-        r'(?:youtube\.com\/v\/)([^&\n?]*)'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
 def get_transcript(video_id, lang_code=None):
     """
     Extract transcript from a YouTube video using YouTube Transcript API.
@@ -332,21 +347,6 @@ def get_available_languages(video_id):
         return languages
     except Exception:
         return []  # Return empty list if no transcripts are available
-
-def check_video_availability(video_id):
-    try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            return True, None
-        else:
-            return False, f"Failed to retrieve video. Status code: {response.status_code}"
-    except Exception as e:
-        return False, f"Failed to check video availability: {str(e)}"
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # For secure session management
