@@ -12,6 +12,7 @@ import requests
 import json
 import xml.etree.ElementTree as ET
 import logging
+from pytube import YouTube
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -100,135 +101,76 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-def get_transcript(video_id, lang_code=None):
-    """Get transcript using alternative method"""
-    logger.info(f"Starting transcript retrieval for video ID: {video_id}")
+def get_transcript_pytube(video_id):
+    """Get transcript using pytube"""
     try:
-        # First, try YouTube Transcript API
+        logger.info("Attempting pytube transcript method...")
+        yt = YouTube(f'https://www.youtube.com/watch?v={video_id}')
+        captions = yt.captions
+        
+        if not captions:
+            logger.warning("No captions found via pytube")
+            return None
+            
+        # Try to get English captions first, then fall back to any available caption
+        caption = captions.get('en', next(iter(captions.values())) if captions else None)
+        
+        if caption:
+            logger.info(f"Found caption track: {caption.code}")
+            transcript = caption.generate_srt_captions()
+            # Clean up the SRT format to plain text
+            cleaned_transcript = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n', '', transcript)
+            cleaned_transcript = cleaned_transcript.replace('\n\n', ' ').strip()
+            return cleaned_transcript
+            
+        return None
+    except Exception as e:
+        logger.error(f"Pytube transcript retrieval failed: {str(e)}")
+        return None
+
+def get_transcript(video_id, lang_code=None):
+    """Get transcript using multiple methods"""
+    logger.info(f"Starting transcript retrieval for video ID: {video_id}")
+    
+    # First check video availability
+    is_available, message = check_video_availability(video_id)
+    if not is_available:
+        logger.error(f"Video availability check failed: {message}")
+        return f"Error: {message}"
+    
+    try:
+        # 1. Try YouTube Transcript API first
         try:
             logger.info("Attempting YouTube Transcript API method...")
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            # Try to get generated transcripts first
             generated_transcripts = list(transcript_list._generated_transcripts.values())
-            logger.info(f"Found {len(generated_transcripts)} generated transcripts")
             
             if generated_transcripts:
-                # If language is specified, try to find a match
                 if lang_code:
-                    logger.info(f"Looking for transcript in language: {lang_code}")
                     for transcript in generated_transcripts:
                         if transcript.language_code == lang_code:
-                            logger.info(f"Found matching language transcript")
                             return TextFormatter().format_transcript(transcript.fetch())
-                
-                # Otherwise, use the first generated transcript
-                logger.info("Using first available generated transcript")
                 return TextFormatter().format_transcript(generated_transcripts[0].fetch())
         except Exception as e:
             logger.error(f"YouTube Transcript API failed: {str(e)}")
         
-        # Alternative method: Extract captions from video page
-        logger.info("Attempting alternative caption extraction method...")
-        def extract_captions_from_video_page(video_id):
-            try:
-                # Fetch the video page
-                url = f"https://www.youtube.com/watch?v={video_id}"
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
-                logger.info(f"Fetching video page: {url}")
-                response = requests.get(url, headers=headers)
-                
-                if response.status_code != 200:
-                    logger.error(f"Failed to fetch video page. Status code: {response.status_code}")
-                    return None
-                
-                # Look for captions in the page source
-                logger.info("Searching for caption data in page source")
-                caption_pattern = r'{"captionTracks":(\[.*?\]),'
-                match = re.search(caption_pattern, response.text)
-                
-                if match:
-                    logger.info("Found caption tracks in page source")
-                    # Parse the captions
-                    captions_json = match.group(1)
-                    captions = json.loads(captions_json)
-                    
-                    # Log available caption types
-                    logger.info(f"Found {len(captions)} caption tracks")
-                    for cap in captions:
-                        logger.info(f"Caption type: {cap.get('kind')}, language: {cap.get('languageCode')}")
-                    
-                    # Prioritize auto-generated captions
-                    auto_captions = [
-                        caption for caption in captions 
-                        if caption.get('kind', '').lower() == 'asr'
-                    ]
-                    
-                    if auto_captions:
-                        logger.info(f"Found {len(auto_captions)} auto-generated captions")
-                        # Select appropriate caption
-                        if lang_code:
-                            lang_captions = [
-                                caption for caption in auto_captions 
-                                if caption.get('languageCode') == lang_code
-                            ]
-                            if lang_captions:
-                                caption = lang_captions[0]
-                                logger.info(f"Using language-specific caption: {lang_code}")
-                            else:
-                                caption = auto_captions[0]
-                                logger.info("Using first available auto-generated caption")
-                        else:
-                            caption = auto_captions[0]
-                            logger.info("Using first available auto-generated caption")
-                        
-                        # Fetch the caption file
-                        caption_url = caption.get('baseUrl')
-                        if caption_url:
-                            logger.info(f"Fetching caption file from URL")
-                            caption_response = requests.get(caption_url, headers=headers)
-                            
-                            if caption_response.status_code != 200:
-                                logger.error(f"Failed to fetch caption file. Status code: {caption_response.status_code}")
-                                return None
-                            
-                            # Parse XML captions
-                            try:
-                                root = ET.fromstring(caption_response.text)
-                                
-                                # Extract text from XML
-                                texts = root.findall('.//text')
-                                logger.info(f"Found {len(texts)} caption segments")
-                                
-                                transcript_text = ' '.join([
-                                    text.text for text in texts if text.text
-                                ])
-                                
-                                logger.info("Successfully extracted caption text")
-                                return transcript_text
-                            except ET.ParseError as e:
-                                logger.error(f"XML parsing error: {str(e)}")
-                                return None
-                
-                logger.warning("No caption tracks found in page source")
-                return None
-            except Exception as e:
-                logger.error(f"Alternative caption extraction failed: {str(e)}")
-                return None
+        # 2. Try pytube method
+        pytube_transcript = get_transcript_pytube(video_id)
+        if pytube_transcript:
+            logger.info("Successfully retrieved transcript using pytube")
+            return pytube_transcript
         
-        # Try alternative method
-        logger.info("Attempting alternative caption extraction")
+        # 3. Try web scraping method as last resort
+        logger.info("Attempting web scraping method...")
         alternative_transcript = extract_captions_from_video_page(video_id)
         if alternative_transcript:
-            logger.info("Successfully retrieved transcript using alternative method")
+            logger.info("Successfully retrieved transcript using web scraping")
             return alternative_transcript
         
         # If all methods fail
         logger.error("All transcript retrieval methods failed")
-        return "Error: Could not retrieve transcript. No captions available."
-    
+        return "Error: Could not retrieve captions. Please try a video with subtitles enabled."
+        
     except Exception as e:
         logger.error(f"Transcript retrieval error: {str(e)}")
         return f"Error: Unable to retrieve transcript. Details: {str(e)}"
@@ -354,6 +296,109 @@ def get_transcript_route():
     except Exception as e:
         logger.error(f"Unexpected error in transcript route: {str(e)}")
         return jsonify({'error': f"An unexpected error occurred: {str(e)}"}), 500
+
+def extract_captions_from_video_page(video_id):
+    try:
+        # Fetch the video page
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        logger.info(f"Fetching video page: {url}")
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to fetch video page. Status code: {response.status_code}")
+            return None
+        
+        # Look for captions in the page source
+        logger.info("Searching for caption data in page source")
+        caption_pattern = r'{"captionTracks":(\[.*?\]),'
+        match = re.search(caption_pattern, response.text)
+        
+        if match:
+            logger.info("Found caption tracks in page source")
+            # Parse the captions
+            captions_json = match.group(1)
+            captions = json.loads(captions_json)
+            
+            # Log available caption types
+            logger.info(f"Found {len(captions)} caption tracks")
+            for cap in captions:
+                logger.info(f"Caption type: {cap.get('kind')}, language: {cap.get('languageCode')}")
+            
+            # Prioritize auto-generated captions
+            auto_captions = [
+                caption for caption in captions 
+                if caption.get('kind', '').lower() == 'asr'
+            ]
+            
+            if auto_captions:
+                logger.info(f"Found {len(auto_captions)} auto-generated captions")
+                # Select appropriate caption
+                if lang_code:
+                    lang_captions = [
+                        caption for caption in auto_captions 
+                        if caption.get('languageCode') == lang_code
+                    ]
+                    if lang_captions:
+                        caption = lang_captions[0]
+                        logger.info(f"Using language-specific caption: {lang_code}")
+                    else:
+                        caption = auto_captions[0]
+                        logger.info("Using first available auto-generated caption")
+                else:
+                    caption = auto_captions[0]
+                    logger.info("Using first available auto-generated caption")
+                
+                # Fetch the caption file
+                caption_url = caption.get('baseUrl')
+                if caption_url:
+                    logger.info(f"Fetching caption file from URL")
+                    caption_response = requests.get(caption_url, headers=headers)
+                    
+                    if caption_response.status_code != 200:
+                        logger.error(f"Failed to fetch caption file. Status code: {caption_response.status_code}")
+                        return None
+                    
+                    # Parse XML captions
+                    try:
+                        root = ET.fromstring(caption_response.text)
+                        
+                        # Extract text from XML
+                        texts = root.findall('.//text')
+                        logger.info(f"Found {len(texts)} caption segments")
+                        
+                        transcript_text = ' '.join([
+                            text.text for text in texts if text.text
+                        ])
+                        
+                        logger.info("Successfully extracted caption text")
+                        return transcript_text
+                    except ET.ParseError as e:
+                        logger.error(f"XML parsing error: {str(e)}")
+                        return None
+        
+        logger.warning("No caption tracks found in page source")
+        return None
+    except Exception as e:
+        logger.error(f"Alternative caption extraction failed: {str(e)}")
+        return None
+
+def check_video_availability(video_id):
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            return True, None
+        else:
+            return False, f"Failed to retrieve video. Status code: {response.status_code}"
+    except Exception as e:
+        return False, f"Failed to check video availability: {str(e)}"
 
 if __name__ == '__main__':
     app.run(debug=True, port=3000)
