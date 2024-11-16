@@ -315,8 +315,9 @@ def get_transcript_route():
         data = request.get_json()
         url = data.get('url')
         lang_code = data.get('language')
+        service = data.get('service', 'gemini')  # Default to gemini if not specified
         
-        logger.info(f"Processing URL: {url}, Language: {lang_code}")
+        logger.info(f"Processing URL: {url}, Language: {lang_code}, Service: {service}")
         
         if not url:
             logger.error("No URL provided")
@@ -333,9 +334,22 @@ def get_transcript_route():
         if transcript.startswith('Error:'):
             logger.error(f"Transcript error: {transcript}")
             return jsonify({'error': transcript}), 400
-            
-        logger.info("Successfully retrieved transcript")
-        return jsonify({'transcript': transcript})
+        
+        # Get API key from session
+        api_key = session.get(f'{service}_api_key')
+        if not api_key:
+            logger.error(f"No API key found for {service}")
+            return jsonify({"error": f"No API key found for {service}. Please set an API key first."}), 401
+        
+        # Generate summary
+        logger.info("Generating summary with AI")
+        summary = summarize_with_ai(transcript, service, api_key)
+        
+        logger.info("Successfully processed transcript and summary")
+        return jsonify({
+            'transcript': transcript,
+            'processed_content': summary
+        })
         
     except Exception as e:
         logger.error(f"Unexpected error in transcript route: {str(e)}")
