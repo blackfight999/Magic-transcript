@@ -11,6 +11,6 @@ services:
       - key: FLASK_ENV
         value: production
       - key: FLASK_SECRET_KEY
-        value: your-secret-key-here
+        value: "737482c1ddf734d660222fb4810a0a99b7b777655c3324f7dd2188e9cb34cfef"
     routes:
       - path: /
