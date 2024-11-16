@@ -121,32 +121,50 @@ def get_available_languages(video_id):
 def get_transcript(video_id, lang_code=None):
     """Get transcript in specified language or original language"""
     try:
+        # Try multiple methods to retrieve the transcript
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
+        # If a specific language is provided
         if lang_code:
             try:
+                # Try to find transcript in specified language
                 transcript = transcript_list.find_transcript([lang_code])
-            except:
-                # Fallback to any available transcript
-                try:
-                    transcript = transcript_list.find_manually_created_transcript()
-                except:
-                    transcript = list(transcript_list._generated_transcripts.values())[0]
-        else:
-            # Get original language transcript
-            try:
-                transcript = transcript_list.find_manually_created_transcript()
-            except:
-                transcript = list(transcript_list._generated_transcripts.values())[0]
+                return TextFormatter().format_transcript(transcript.fetch())
+            except Exception:
+                pass
         
-        transcript_data = transcript.fetch()
-        formatter = TextFormatter()
-        formatted_transcript = formatter.format_transcript(transcript_data)
-        detected_language = detect(formatted_transcript)
+        # Try to get manually created transcripts
+        try:
+            manual_transcript = transcript_list.find_manually_created_transcript()
+            return TextFormatter().format_transcript(manual_transcript.fetch())
+        except Exception:
+            pass
         
-        return formatted_transcript, detected_language, transcript.language
+        # Try to get generated transcripts
+        try:
+            generated_transcript = transcript_list.find_generated_transcript()
+            return TextFormatter().format_transcript(generated_transcript.fetch())
+        except Exception:
+            pass
+        
+        # Try to get the first available transcript
+        try:
+            first_transcript = transcript_list.transcripts[0]
+            return TextFormatter().format_transcript(first_transcript.fetch())
+        except Exception:
+            pass
+        
+        # If all methods fail
+        raise NoTranscriptFound("No transcript could be retrieved")
+        
+    except TranscriptsDisabled:
+        return "Error: This video does not have subtitles/transcripts enabled. Please try another video that has subtitles available."
+    except NoTranscriptFound:
+        return "Error: No transcript found for this video. Please try another video with available subtitles."
     except Exception as e:
-        raise Exception(f"Error getting transcript: {str(e)}")
+        # Log the full error for debugging
+        print(f"Transcript retrieval error: {str(e)}")
+        return f"Error: Unable to retrieve transcript. Details: {str(e)}"
 
 @app.route('/set_api_key', methods=['POST'])
 def set_api_key():
@@ -207,7 +225,7 @@ def get_transcript_route():
             return jsonify({'error': 'Invalid YouTube URL'}), 400
         
         try:
-            transcript, detected_language, transcript_language = get_transcript(video_id, lang_code)
+            transcript = get_transcript(video_id, lang_code)
             service = request.json.get('service', 'gemini')
             api_key = session.get(f'{service}_api_key')
             
@@ -218,9 +236,7 @@ def get_transcript_route():
             
             return jsonify({
                 'transcript': transcript,
-                'processed_content': summary,
-                'detected_language': detected_language,
-                'transcript_language': transcript_language
+                'processed_content': summary
             })
                 
         except (TranscriptsDisabled, NoTranscriptFound):

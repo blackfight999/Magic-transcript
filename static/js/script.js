@@ -146,14 +146,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function getTranscript(url, language = '') {
         try {
-            if (!currentService) {
-                showApiKeyModal();
-                return;
-            }
-
-            loader.style.display = 'flex';
             clearError();
-
+            loader.style.display = 'block';
+            resultSection.style.display = 'none';
+            
             const response = await fetch('/get_transcript', {
                 method: 'POST',
                 headers: {
@@ -161,23 +157,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 },
                 body: JSON.stringify({ 
                     url, 
-                    lang_code: language,
-                    service: currentService  // Add selected service
-                }),
+                    language, 
+                    service: apiServiceSelect.value,
+                    api_key: apiKeyInput.value 
+                })
             });
-
+            
             const data = await response.json();
-
-            if (response.ok) {
-                transcriptContent.textContent = data.transcript;
-                analysisContent.innerHTML = data.processed_content.replace(/\n/g, '<br>');
+            
+            if (!response.ok) {
+                // Handle error responses
+                throw new Error(data.error || 'Failed to get transcript');
+            }
+            
+            // Check for error in response body
+            if (data.error) {
+                showError(data.error);
+                return;
+            }
+            
+            // Update transcript content
+            transcriptContent.textContent = data.transcript;
+            
+            // Proceed with AI analysis if transcript exists
+            if (data.transcript) {
+                analysisContent.textContent = data.processed_content || 'No analysis available';
                 resultSection.style.display = 'block';
             } else {
-                showError(data.error || 'Failed to get transcript');
+                showError('No transcript could be retrieved for this video.');
             }
+            
         } catch (error) {
-            console.error('Transcript Error:', error);
-            showError('An error occurred while fetching the transcript');
+            showError(error.message || 'An unexpected error occurred');
         } finally {
             loader.style.display = 'none';
         }
