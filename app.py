@@ -8,6 +8,9 @@ import openai
 import anthropic
 import re
 import os
+import requests
+import json
+import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)  # For secure session management
@@ -92,6 +95,99 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
+def get_transcript(video_id, lang_code=None):
+    """Get transcript using alternative method"""
+    try:
+        # First, try YouTube Transcript API
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Try to get generated transcripts first
+            generated_transcripts = list(transcript_list._generated_transcripts.values())
+            
+            if generated_transcripts:
+                # If language is specified, try to find a match
+                if lang_code:
+                    for transcript in generated_transcripts:
+                        if transcript.language_code == lang_code:
+                            return TextFormatter().format_transcript(transcript.fetch())
+                
+                # Otherwise, use the first generated transcript
+                return TextFormatter().format_transcript(generated_transcripts[0].fetch())
+        except Exception as e:
+            print(f"YouTube Transcript API failed: {e}")
+        
+        # Alternative method: Extract captions from video page
+        def extract_captions_from_video_page(video_id):
+            try:
+                # Fetch the video page
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                response = requests.get(url, headers=headers)
+                
+                # Look for captions in the page source
+                caption_pattern = r'{"captionTracks":(\[.*?\]),'
+                match = re.search(caption_pattern, response.text)
+                
+                if match:
+                    # Parse the captions
+                    captions_json = match.group(1)
+                    captions = json.loads(captions_json)
+                    
+                    # Prioritize auto-generated captions
+                    auto_captions = [
+                        caption for caption in captions 
+                        if caption.get('kind', '').lower() == 'asr'
+                    ]
+                    
+                    if auto_captions:
+                        # If language is specified, try to find a match
+                        if lang_code:
+                            lang_captions = [
+                                caption for caption in auto_captions 
+                                if caption.get('languageCode') == lang_code
+                            ]
+                            if lang_captions:
+                                caption = lang_captions[0]
+                            else:
+                                caption = auto_captions[0]
+                        else:
+                            caption = auto_captions[0]
+                        
+                        # Fetch the caption file
+                        caption_url = caption.get('baseUrl')
+                        if caption_url:
+                            caption_response = requests.get(caption_url, headers=headers)
+                            
+                            # Parse XML captions
+                            root = ET.fromstring(caption_response.text)
+                            
+                            # Extract text from XML
+                            transcript_text = ' '.join([
+                                text.text for text in root.findall('.//text')
+                            ])
+                            
+                            return transcript_text
+                
+                return None
+            except Exception as e:
+                print(f"Alternative caption extraction failed: {e}")
+                return None
+        
+        # Try alternative method
+        alternative_transcript = extract_captions_from_video_page(video_id)
+        if alternative_transcript:
+            return alternative_transcript
+        
+        # If all methods fail
+        return "Error: Could not retrieve transcript. No captions available."
+    
+    except Exception as e:
+        print(f"Transcript retrieval error: {str(e)}")
+        return f"Error: Unable to retrieve transcript. Details: {str(e)}"
+
 def get_available_languages(video_id):
     """Get list of available transcript languages"""
     try:
@@ -117,54 +213,6 @@ def get_available_languages(video_id):
         return languages
     except Exception as e:
         return []
-
-def get_transcript(video_id, lang_code=None):
-    """Get transcript in specified language or original language"""
-    try:
-        # Try multiple methods to retrieve the transcript
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # If a specific language is provided
-        if lang_code:
-            try:
-                # Try to find transcript in specified language
-                transcript = transcript_list.find_transcript([lang_code])
-                return TextFormatter().format_transcript(transcript.fetch())
-            except Exception:
-                pass
-        
-        # Try to get manually created transcripts
-        try:
-            manual_transcript = transcript_list.find_manually_created_transcript()
-            return TextFormatter().format_transcript(manual_transcript.fetch())
-        except Exception:
-            pass
-        
-        # Try to get generated transcripts
-        try:
-            generated_transcript = transcript_list.find_generated_transcript()
-            return TextFormatter().format_transcript(generated_transcript.fetch())
-        except Exception:
-            pass
-        
-        # Try to get the first available transcript
-        try:
-            first_transcript = transcript_list.transcripts[0]
-            return TextFormatter().format_transcript(first_transcript.fetch())
-        except Exception:
-            pass
-        
-        # If all methods fail
-        raise NoTranscriptFound("No transcript could be retrieved")
-        
-    except TranscriptsDisabled:
-        return "Error: This video does not have subtitles/transcripts enabled. Please try another video that has subtitles available."
-    except NoTranscriptFound:
-        return "Error: No transcript found for this video. Please try another video with available subtitles."
-    except Exception as e:
-        # Log the full error for debugging
-        print(f"Transcript retrieval error: {str(e)}")
-        return f"Error: Unable to retrieve transcript. Details: {str(e)}"
 
 @app.route('/set_api_key', methods=['POST'])
 def set_api_key():
