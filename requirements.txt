@@ -9,6 +9,7 @@ google-api-core>=2.10.0,<3.0.0
 google-api-python-client>=2.80.0,<3.0.0
 google-auth>=2.20.0,<3.0.0
 google-auth-httplib2>=0.1.0,<1.0.0
+google-auth-oauthlib>=0.4.6
 annotated-types>=0.7.0,<1.0.0
 blinker>=1.8.2,<2.0.0
 cachetools>=5.5.0,<6.0.0

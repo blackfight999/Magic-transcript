@@ -13,6 +13,8 @@ import json
 import xml.etree.ElementTree as ET
 import logging
 from pytube import YouTube
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -128,6 +130,69 @@ def get_transcript_pytube(video_id):
         logger.error(f"Pytube transcript retrieval failed: {str(e)}")
         return None
 
+def get_transcript_youtube_api(video_id):
+    """Get transcript using YouTube Data API"""
+    try:
+        logger.info("Attempting YouTube Data API method...")
+        # You'll need to set this in your environment variables
+        api_key = os.getenv('YOUTUBE_API_KEY')
+        
+        if not api_key:
+            logger.error("YouTube API key not found")
+            return None
+            
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        
+        # Get video details including caption status
+        video_response = youtube.videos().list(
+            part='contentDetails',
+            id=video_id
+        ).execute()
+        
+        if not video_response.get('items'):
+            logger.error("Video not found")
+            return None
+            
+        video_item = video_response['items'][0]
+        has_captions = video_item['contentDetails'].get('caption', 'false') == 'true'
+        
+        if not has_captions:
+            logger.warning("Video does not have captions according to YouTube API")
+            return None
+            
+        # Get caption track
+        captions_response = youtube.captions().list(
+            part='snippet',
+            videoId=video_id
+        ).execute()
+        
+        if not captions_response.get('items'):
+            logger.warning("No caption tracks found via YouTube API")
+            return None
+            
+        # Get the first available caption track
+        caption_id = captions_response['items'][0]['id']
+        
+        # Download the caption track
+        caption = youtube.captions().download(
+            id=caption_id,
+            tfmt='srt'
+        ).execute()
+        
+        # Clean up the SRT format
+        cleaned_transcript = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n', '', caption.decode())
+        cleaned_transcript = cleaned_transcript.replace('\n\n', ' ').strip()
+        
+        logger.info("Successfully retrieved transcript via YouTube API")
+        return cleaned_transcript
+        
+    except HttpError as e:
+        logger.error(f"YouTube API error: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Error in YouTube API method: {str(e)}")
+        return None
+
 def get_transcript(video_id, lang_code=None):
     """Get transcript using multiple methods"""
     logger.info(f"Starting transcript retrieval for video ID: {video_id}")
@@ -139,7 +204,12 @@ def get_transcript(video_id, lang_code=None):
         return f"Error: {message}"
     
     try:
-        # 1. Try YouTube Transcript API first
+        # 1. Try YouTube Data API first
+        youtube_api_transcript = get_transcript_youtube_api(video_id)
+        if youtube_api_transcript:
+            return youtube_api_transcript
+            
+        # 2. Try YouTube Transcript API
         try:
             logger.info("Attempting YouTube Transcript API method...")
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -154,13 +224,13 @@ def get_transcript(video_id, lang_code=None):
         except Exception as e:
             logger.error(f"YouTube Transcript API failed: {str(e)}")
         
-        # 2. Try pytube method
+        # 3. Try pytube method
         pytube_transcript = get_transcript_pytube(video_id)
         if pytube_transcript:
             logger.info("Successfully retrieved transcript using pytube")
             return pytube_transcript
         
-        # 3. Try web scraping method as last resort
+        # 4. Try web scraping method as last resort
         logger.info("Attempting web scraping method...")
         alternative_transcript = extract_captions_from_video_page(video_id)
         if alternative_transcript:
@@ -169,7 +239,7 @@ def get_transcript(video_id, lang_code=None):
         
         # If all methods fail
         logger.error("All transcript retrieval methods failed")
-        return "Error: Could not retrieve captions. Please try a video with subtitles enabled."
+        return "Error: Could not retrieve captions. This video might not have captions enabled. Please try a different video that has captions or subtitles."
         
     except Exception as e:
         logger.error(f"Transcript retrieval error: {str(e)}")
