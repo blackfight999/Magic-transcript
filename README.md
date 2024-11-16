@@ -66,6 +66,133 @@ docker build -t magic-transcript .
 docker run -p 3000:3000 magic-transcript
 ```
 
+## DigitalOcean Deployment 🌊
+
+1. **Create a Droplet**:
+   - Sign up/login to [DigitalOcean](https://www.digitalocean.com)
+   - Create a new Droplet
+   - Choose Ubuntu 22.04 LTS
+   - Select Basic plan (minimum 1GB RAM)
+   - Choose a datacenter region
+   - Add your SSH key or create a password
+   - Click "Create Droplet"
+
+2. **Connect to Your Droplet**:
+```bash
+ssh root@your_droplet_ip
+```
+
+3. **Install Dependencies**:
+```bash
+# Update system packages
+apt update && apt upgrade -y
+
+# Install Python and required packages
+apt install python3-pip python3-venv nginx -y
+
+# Install Git
+apt install git -y
+```
+
+4. **Clone and Setup Application**:
+```bash
+# Clone repository
+git clone https://github.com/blackfight999/Magic-transcript.git
+cd Magic-transcript
+
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+pip install gunicorn
+```
+
+5. **Create Systemd Service**:
+```bash
+# Create service file
+cat > /etc/systemd/system/magictranscript.service << EOL
+[Unit]
+Description=Magic Transcript Gunicorn Service
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/Magic-transcript
+Environment="PATH=/root/Magic-transcript/venv/bin"
+ExecStart=/root/Magic-transcript/venv/bin/gunicorn -w 4 -b 127.0.0.1:8000 app:app
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+# Start and enable service
+systemctl start magictranscript
+systemctl enable magictranscript
+```
+
+6. **Configure Nginx**:
+```bash
+# Create Nginx config
+cat > /etc/nginx/sites-available/magictranscript << EOL
+server {
+    listen 80;
+    server_name your_domain_or_ip;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+    }
+}
+EOL
+
+# Create symlink and test config
+ln -s /etc/nginx/sites-available/magictranscript /etc/nginx/sites-enabled/
+nginx -t
+
+# Remove default nginx site and restart
+rm /etc/nginx/sites-enabled/default
+systemctl restart nginx
+```
+
+7. **Setup Firewall**:
+```bash
+# Configure UFW
+ufw allow OpenSSH
+ufw allow 'Nginx Full'
+ufw enable
+```
+
+8. **SSL Certificate (Optional)**:
+```bash
+# Install Certbot
+apt install certbot python3-certbot-nginx -y
+
+# Obtain SSL certificate
+certbot --nginx -d your_domain
+```
+
+Your application should now be accessible at `http://your_domain_or_ip` (or `https://` if you configured SSL).
+
+## Maintenance and Monitoring 🔧
+
+- **View Application Logs**:
+```bash
+journalctl -u magictranscript.service
+```
+
+- **Restart Application**:
+```bash
+systemctl restart magictranscript
+```
+
+- **Monitor System Resources**:
+```bash
+htop  # Install with: apt install htop
+```
+
 ## Tech Stack 💻
 
 - **Backend**: Python/Flask

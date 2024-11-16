@@ -1,62 +1,180 @@
+# Standard library imports
+import re
+import os
+import json
+import logging
+import functools
+import threading
+import queue
+import time
+from urllib.parse import urlparse
+import requests
+
+# Third-party library imports
 from flask import Flask, render_template, request, jsonify, session
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import TextFormatter
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-from langdetect import detect
 import google.generativeai as genai
 import openai
 import anthropic
-import re
-import os
-import requests
-import json
-import xml.etree.ElementTree as ET
-import logging
-from pytube import YouTube
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-app.secret_key = os.urandom(24)  # For secure session management
+def timeout_with_queue(func, timeout_seconds):
+    """
+    Run a function with a timeout using threading and queue
+    
+    Args:
+        func (callable): Function to run
+        timeout_seconds (int): Maximum time to allow function to run
+    
+    Returns:
+        Result of the function or raises an exception
+    """
+    result_queue = queue.Queue()
+    exception_queue = queue.Queue()
 
-def configure_ai_service(service, api_key):
-    """Configure AI service based on the selected provider"""
-    if service == 'gemini':
-        genai.configure(api_key=api_key)
-    elif service == 'openai':
-        openai.api_key = api_key
-    elif service == 'claude':
-        return anthropic.Anthropic(api_key=api_key)
-    return None
+    def wrapper(*args, **kwargs):
+        try:
+            result = func(*args, **kwargs)
+            result_queue.put(result)
+        except Exception as e:
+            exception_queue.put(e)
+
+    thread = threading.Thread(target=wrapper)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout_seconds)
+
+    if thread.is_alive():
+        raise TimeoutError(f"Function call timed out after {timeout_seconds} seconds")
+
+    if not exception_queue.empty():
+        raise exception_queue.get()
+
+    if not result_queue.empty():
+        return result_queue.get()
+
+    raise TimeoutError("Function did not return a result")
+
+# Timeout decorator
+class TimeoutError(Exception):
+    """Timeout exception for long-running operations"""
+    pass
+
+def timeout(seconds):
+    """
+    Decorator to add timeout to functions
+    
+    Args:
+        seconds (int): Maximum time to allow function to run
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return timeout_with_queue(func, seconds)(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def validate_youtube_url(url):
+    """
+    Validate YouTube URL format
+    
+    Args:
+        url (str): URL to validate
+    
+    Returns:
+        bool: Whether URL is a valid YouTube URL
+    """
+    try:
+        parsed_url = urlparse(url)
+        valid_domains = ['youtube.com', 'www.youtube.com', 'youtu.be']
+        
+        # Check domain
+        if parsed_url.netloc not in valid_domains:
+            return False
+        
+        # Check for video ID in different URL formats
+        if 'youtu.be' in parsed_url.netloc:
+            return bool(re.match(r'^/[a-zA-Z0-9_-]{11}$', parsed_url.path))
+        
+        # Check for video ID in standard YouTube URL
+        return bool(re.search(r'(v=|embed/|v/)[a-zA-Z0-9_-]{11}', url))
+    
+    except Exception:
+        return False
+
+def configure_ai_service(service, api_key=None):
+    """
+    Configure AI service based on the selected provider
+    
+    Args:
+        service (str): AI service to configure
+        api_key (str, optional): API key for the service
+    
+    Returns:
+        Configured client or None
+    """
+    try:
+        # Use session API key if not provided
+        if not api_key and service in session:
+            api_key = session.get(f'{service}_api_key')
+        
+        # Validate API key
+        if not api_key:
+            raise ValueError(f"No API key provided for {service}")
+        
+        # Configure specific AI services
+        if service == 'gemini':
+            genai.configure(api_key=api_key)
+            return None  # Gemini doesn't require a client object
+        
+        elif service == 'openai':
+            openai.api_key = api_key
+            return None  # OpenAI uses global configuration
+        
+        elif service == 'claude':
+            return anthropic.Anthropic(api_key=api_key)
+        
+        else:
+            raise ValueError(f"Unsupported AI service: {service}")
+    
+    except Exception as e:
+        logger.error(f"Error configuring {service} service: {str(e)}")
+        raise
 
 def summarize_with_ai(transcript, service, api_key):
-    """Flexible AI summarization based on selected service"""
+    """
+    Flexible AI summarization with improved error handling and token management
+    
+    Args:
+        transcript (str): Text to summarize
+        service (str): AI service to use
+        api_key (str): API key for the service
+    
+    Returns:
+        str: Summarized text or error message
+    """
+    # Truncate transcript if too long
+    MAX_TOKENS = 4000  # Adjust based on model limits
+    if len(transcript) > MAX_TOKENS * 4:  # Rough token estimation
+        logger.warning(f"Transcript truncated from {len(transcript)} to {MAX_TOKENS * 4} characters")
+        transcript = transcript[:MAX_TOKENS * 4] + "... [Transcript truncated]"
+    
     SUMMARY_PROMPT = """Given a text containing complex information about a specific topic, your role is to act as an expert summarizer with 20 years experience.
 
-Start by reading through the provided content to fully understand its scope and depth. Identify the key themes and critical details that are central to the topic.
+Summarize the following transcript, focusing on the most important 20% of the information. Break down complex ideas into easy-to-understand terms. Use bullet points or numbered lists to enhance readability.
 
-Next, create a structured summary by organizing these key points in a logical order. Each point should be clear, concise, and reflect the essential information comprehensively. Please aids users in understanding 80% of a video's content by focusing on the most important 20% of the information, simplifying complex ideas into easy-to-understand terms, making learning more accessible and efficient, and breaking down the content into key points.
-
-Present these points in a manner that anyone unfamiliar with the material can grasp the main ideas and significance of the topic effortlessly. To apply this summarization, use bullet points or numbered lists to enhance readability and ensure that each key point stands out for easy comprehension.
-
-The objective is to produce a summary that effectively communicates the core elements of the topic without necessitating a review of the full text.
-
-Here's the text to summarize:
+Transcript:
 {transcript}"""
 
-    try:
+    def generate_summary():
+        # Configure AI service
         ai_client = configure_ai_service(service, api_key)
         
         if service == 'gemini':
@@ -70,13 +188,13 @@ Here's the text to summarize:
                 messages=[
                     {"role": "system", "content": "You are an expert transcript summarizer with 20 years of experience."},
                     {"role": "user", "content": SUMMARY_PROMPT.format(transcript=transcript)}
-                ]
+                ],
+                max_tokens=1000
             )
             return response.choices[0].message.content
         
         elif service == 'claude':
             try:
-                # Try the newer method first
                 response = ai_client.messages.create(
                     model="claude-2.1",
                     max_tokens=1000,
@@ -85,16 +203,19 @@ Here's the text to summarize:
                     ]
                 )
                 return response.content[0].text
-            except AttributeError:
-                # Fallback to older method if messages attribute doesn't exist
-                response = ai_client.completion.create(
-                    model="claude-2.1",
-                    max_tokens_to_sample=1000,
-                    prompt=SUMMARY_PROMPT.format(transcript=transcript)
-                )
-                return response.completion
+            except Exception as e:
+                logger.error(f"Claude API error: {str(e)}")
+                return f"Error in Claude summarization: {str(e)}"
         
+        # Add a fallback for unsupported services
+        raise ValueError(f"Unsupported AI service: {service}")
+    
+    try:
+        # Directly call the function instead of wrapping it
+        return generate_summary()
+    
     except Exception as e:
+        logger.error(f"Error in AI summarization: {str(e)}")
         return f"Error in AI summarization: {str(e)}"
 
 def extract_video_id(url):
@@ -111,246 +232,124 @@ def extract_video_id(url):
             return match.group(1)
     return None
 
-def get_transcript_pytube(video_id):
-    """Get transcript using pytube"""
-    try:
-        logger.info("Attempting pytube transcript method...")
-        yt = YouTube(f'https://www.youtube.com/watch?v={video_id}')
-        captions = yt.captions
-        
-        if not captions:
-            logger.warning("No captions found via pytube")
-            return None
-            
-        # Try to get English captions first, then fall back to any available caption
-        caption = captions.get('en', next(iter(captions.values())) if captions else None)
-        
-        if caption:
-            logger.info(f"Found caption track: {caption.code}")
-            transcript = caption.generate_srt_captions()
-            # Clean up the SRT format to plain text
-            cleaned_transcript = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n', '', transcript)
-            cleaned_transcript = cleaned_transcript.replace('\n\n', ' ').strip()
-            return cleaned_transcript
-            
-        return None
-    except Exception as e:
-        logger.error(f"Pytube transcript retrieval failed: {str(e)}")
-        return None
-
-def get_transcript_youtube_api(video_id):
-    """Get transcript using YouTube Data API"""
-    try:
-        logger.info("Attempting YouTube Data API method...")
-        # You'll need to set this in your environment variables
-        api_key = os.getenv('YOUTUBE_API_KEY')
-        
-        if not api_key:
-            logger.error("YouTube API key not found")
-            return None
-            
-        youtube = build('youtube', 'v3', developerKey=api_key)
-        
-        # Get video details including caption status
-        video_response = youtube.videos().list(
-            part='contentDetails',
-            id=video_id
-        ).execute()
-        
-        if not video_response.get('items'):
-            logger.error("Video not found")
-            return None
-            
-        video_item = video_response['items'][0]
-        has_captions = video_item['contentDetails'].get('caption', 'false') == 'true'
-        
-        if not has_captions:
-            logger.warning("Video does not have captions according to YouTube API")
-            return None
-            
-        # Get caption track
-        captions_response = youtube.captions().list(
-            part='snippet',
-            videoId=video_id
-        ).execute()
-        
-        if not captions_response.get('items'):
-            logger.warning("No caption tracks found via YouTube API")
-            return None
-            
-        # Get the first available caption track
-        caption_id = captions_response['items'][0]['id']
-        
-        # Download the caption track
-        caption = youtube.captions().download(
-            id=caption_id,
-            tfmt='srt'
-        ).execute()
-        
-        # Clean up the SRT format
-        cleaned_transcript = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}\n', '', caption.decode())
-        cleaned_transcript = cleaned_transcript.replace('\n\n', ' ').strip()
-        
-        logger.info("Successfully retrieved transcript via YouTube API")
-        return cleaned_transcript
-        
-    except HttpError as e:
-        logger.error(f"YouTube API error: {str(e)}")
-        return None
-    except Exception as e:
-        logger.error(f"Error in YouTube API method: {str(e)}")
-        return None
-
-def get_transcript_selenium(video_id):
-    """Get transcript using Selenium"""
-    try:
-        logger.info("Attempting Selenium transcript method...")
-        
-        # Configure Chrome options
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')  # Run in headless mode
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        
-        # Set up Chrome driver
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        
-        try:
-            # Load video page
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            logger.info(f"Loading video page: {url}")
-            driver.get(url)
-            
-            # Wait for and click the more actions button
-            wait = WebDriverWait(driver, 10)
-            more_button = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "button.ytp-button.ytp-settings-button"))
-            )
-            more_button.click()
-            
-            # Wait for and click the subtitles/CC button
-            subtitles_button = wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".ytp-menuitem[role='menuitem']"))
-            )
-            subtitles_button.click()
-            
-            # Wait for auto-generated subtitles to appear
-            auto_subtitles = wait.until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".ytp-caption-segment"))
-            )
-            
-            # Extract text from subtitles
-            transcript_parts = []
-            for subtitle in auto_subtitles:
-                text = subtitle.get_attribute('innerText').strip()
-                if text:
-                    transcript_parts.append(text)
-            
-            if transcript_parts:
-                transcript = ' '.join(transcript_parts)
-                logger.info("Successfully retrieved transcript using Selenium")
-                return transcript
-            else:
-                logger.warning("No subtitle text found")
-                return None
-                
-        except TimeoutException as e:
-            logger.error(f"Timeout waiting for elements: {str(e)}")
-            return None
-        except NoSuchElementException as e:
-            logger.error(f"Element not found: {str(e)}")
-            return None
-        finally:
-            driver.quit()
-            
-    except Exception as e:
-        logger.error(f"Selenium transcript retrieval failed: {str(e)}")
-        return None
-
 def get_transcript(video_id, lang_code=None):
-    """Get transcript using multiple methods"""
-    logger.info(f"Starting transcript retrieval for video ID: {video_id}")
+    """
+    Extract transcript from a YouTube video using YouTube Transcript API.
     
-    # First check video availability
-    is_available, message = check_video_availability(video_id)
-    if not is_available:
-        logger.error(f"Video availability check failed: {message}")
-        return f"Error: {message}"
+    Args:
+        video_id (str): YouTube video ID
+        lang_code (str, optional): Specific language code
     
+    Returns:
+        str: Extracted transcript text
+    """
     try:
-        # 1. Try Selenium method first (best for auto-generated captions)
-        selenium_transcript = get_transcript_selenium(video_id)
-        if selenium_transcript:
-            return selenium_transcript
+        # Retrieve all available transcripts
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
-        # 2. Try YouTube Data API
-        youtube_api_transcript = get_transcript_youtube_api(video_id)
-        if youtube_api_transcript:
-            return youtube_api_transcript
-            
-        # 3. Try YouTube Transcript API
-        try:
-            logger.info("Attempting YouTube Transcript API method...")
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            generated_transcripts = list(transcript_list._generated_transcripts.values())
-            
-            if generated_transcripts:
-                if lang_code:
-                    for transcript in generated_transcripts:
-                        if transcript.language_code == lang_code:
-                            return TextFormatter().format_transcript(transcript.fetch())
-                return TextFormatter().format_transcript(generated_transcripts[0].fetch())
-        except Exception as e:
-            logger.error(f"YouTube Transcript API failed: {str(e)}")
+        # Get list of available language codes
+        available_languages = []
+        for transcript in transcript_list._manually_created_transcripts.values():
+            available_languages.append(transcript.language_code)
+        for transcript in transcript_list._generated_transcripts.values():
+            available_languages.append(transcript.language_code)
         
-        # 4. Try pytube method
-        pytube_transcript = get_transcript_pytube(video_id)
-        if pytube_transcript:
-            logger.info("Successfully retrieved transcript using pytube")
-            return pytube_transcript
+        # If language specified, try to find that specific transcript
+        if lang_code:
+            try:
+                # Attempt to find exact language match
+                transcript = transcript_list.find_transcript([lang_code])
+            except Exception:
+                # Fallback to first generated transcript in available languages
+                if available_languages:
+                    transcript = transcript_list.find_generated_transcript(available_languages)
+                else:
+                    return "Error: No transcripts available for this video."
+        else:
+            # Get first available generated transcript
+            if available_languages:
+                transcript = transcript_list.find_generated_transcript(available_languages)
+            else:
+                return "Error: No transcripts available for this video."
         
-        # 5. Try web scraping method as last resort
-        logger.info("Attempting web scraping method...")
-        alternative_transcript = extract_captions_from_video_page(video_id, lang_code)
-        if alternative_transcript:
-            logger.info("Successfully retrieved transcript using web scraping")
-            return alternative_transcript
+        # Fetch transcript data
+        transcript_data = transcript.fetch()
         
-        # If all methods fail
-        logger.error("All transcript retrieval methods failed")
-        return "Error: Could not retrieve captions. This video might not have captions enabled. Please try a different video that has captions or subtitles."
+        # Validate transcript
+        if not transcript_data:
+            return "Error: Empty transcript retrieved."
         
+        # Format transcript
+        formatted_transcript = ' '.join([entry['text'] for entry in transcript_data])
+        
+        # Limit transcript length
+        MAX_TRANSCRIPT_LENGTH = 10000  # Adjust as needed
+        if len(formatted_transcript) > MAX_TRANSCRIPT_LENGTH:
+            logger.warning(f"Transcript truncated from {len(formatted_transcript)} to {MAX_TRANSCRIPT_LENGTH} characters")
+            formatted_transcript = formatted_transcript[:MAX_TRANSCRIPT_LENGTH] + "... [Transcript truncated]"
+        
+        return formatted_transcript
+    
+    except TranscriptsDisabled:
+        logger.error("Transcripts are disabled for this video")
+        return "Error: Transcripts are disabled for this video."
+    
+    except NoTranscriptFound:
+        logger.error("No transcript found for this video")
+        return "Error: No transcript found for this video."
+    
     except Exception as e:
-        logger.error(f"Transcript retrieval error: {str(e)}")
-        return f"Error: Unable to retrieve transcript. Details: {str(e)}"
+        logger.error(f"Unexpected error in transcript retrieval: {str(e)}")
+        return f"Error: Unable to retrieve transcript. {str(e)}"
 
 def get_available_languages(video_id):
-    """Get list of available transcript languages"""
+    """
+    Get list of available transcript languages for a video.
+    
+    Args:
+        video_id (str): YouTube video ID
+    
+    Returns:
+        list: Available transcript languages
+    """
     try:
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        languages = []
         
-        # Get manual transcripts
+        languages = []
         for transcript in transcript_list._manually_created_transcripts.values():
             languages.append({
                 'code': transcript.language_code,
                 'name': transcript.language,
                 'type': 'manual'
             })
-            
-        # Get generated transcripts
         for transcript in transcript_list._generated_transcripts.values():
             languages.append({
                 'code': transcript.language_code,
                 'name': transcript.language,
                 'type': 'generated'
             })
-            
+        
         return languages
+    except Exception:
+        return []  # Return empty list if no transcripts are available
+
+def check_video_availability(video_id):
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            return True, None
+        else:
+            return False, f"Failed to retrieve video. Status code: {response.status_code}"
     except Exception as e:
-        return []
+        return False, f"Failed to check video availability: {str(e)}"
+
+app = Flask(__name__)
+app.secret_key = os.urandom(24)  # For secure session management
 
 @app.route('/set_api_key', methods=['POST'])
 def set_api_key():
@@ -416,12 +415,23 @@ def get_transcript_route():
             logger.error("No URL provided")
             return jsonify({'error': 'No URL provided'}), 400
             
+        if not validate_youtube_url(url):
+            logger.error("Invalid YouTube URL format")
+            return jsonify({'error': 'Invalid YouTube URL format'}), 400
+            
         video_id = extract_video_id(url)
         if not video_id:
             logger.error("Invalid YouTube URL format")
             return jsonify({'error': 'Invalid YouTube URL format'}), 400
             
         logger.info(f"Extracted video ID: {video_id}")
+        
+        # Check video availability
+        available, error = check_video_availability(video_id)
+        if not available:
+            logger.error(f"Video unavailable: {error}")
+            return jsonify({'error': error}), 400
+        
         transcript = get_transcript(video_id, lang_code)
         
         if transcript.startswith('Error:'):
@@ -447,142 +457,6 @@ def get_transcript_route():
     except Exception as e:
         logger.error(f"Unexpected error in transcript route: {str(e)}")
         return jsonify({'error': f"An unexpected error occurred: {str(e)}"}), 500
-
-def extract_captions_from_video_page(video_id, lang_code=None):
-    """Extract auto-generated captions using web scraping"""
-    try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        logger.info(f"Fetching video page: {url}")
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code != 200:
-            logger.error(f"Failed to fetch video page. Status code: {response.status_code}")
-            return None
-            
-        # Look for both manual and auto-generated captions
-        logger.info("Searching for caption data in page source")
-        patterns = [
-            r'"captions":({[^}]+})',  # Pattern for newer YouTube format
-            r'{"captionTracks":(\[.*?\])}',  # Pattern for older format
-            r'"playerCaptionsTracklistRenderer":({.*?})\}'  # Another possible format
-        ]
-        
-        caption_data = None
-        for pattern in patterns:
-            match = re.search(pattern, response.text)
-            if match:
-                try:
-                    caption_data = json.loads(match.group(1))
-                    break
-                except json.JSONDecodeError:
-                    continue
-        
-        if not caption_data:
-            logger.warning("No caption data found in any format")
-            return None
-            
-        # Extract caption tracks
-        caption_tracks = []
-        if 'captionTracks' in caption_data:
-            caption_tracks = caption_data['captionTracks']
-        elif 'playerCaptionsTracklistRenderer' in caption_data:
-            caption_tracks = caption_data.get('playerCaptionsTracklistRenderer', {}).get('captionTracks', [])
-        
-        if not caption_tracks:
-            logger.warning("No caption tracks found")
-            return None
-            
-        logger.info(f"Found {len(caption_tracks)} caption tracks")
-        
-        # First try to find auto-generated captions
-        auto_captions = [
-            track for track in caption_tracks
-            if track.get('kind', '').lower() == 'asr' or
-               track.get('vssId', '').startswith('a.') or
-               track.get('isAutoGenerated') == True
-        ]
-        
-        # If no auto-generated captions, try any available captions
-        target_tracks = auto_captions if auto_captions else caption_tracks
-        
-        if not target_tracks:
-            logger.warning("No suitable caption tracks found")
-            return None
-            
-        # Select appropriate caption track
-        selected_track = None
-        if lang_code:
-            # Try to find caption in requested language
-            for track in target_tracks:
-                track_lang = track.get('languageCode', '').split('-')[0]
-                if track_lang == lang_code:
-                    selected_track = track
-                    break
-        
-        # If no language match or no language specified, use first available
-        if not selected_track:
-            selected_track = target_tracks[0]
-        
-        logger.info(f"Selected caption track: {selected_track.get('languageCode')}")
-        
-        # Get the caption content
-        caption_url = selected_track.get('baseUrl')
-        if not caption_url:
-            logger.error("No baseUrl found in caption track")
-            return None
-            
-        # Add necessary parameters to URL
-        caption_url += '&fmt=srv3'  # Request transcript in XML format
-        
-        logger.info("Fetching caption content")
-        caption_response = requests.get(caption_url, headers=headers)
-        
-        if caption_response.status_code != 200:
-            logger.error(f"Failed to fetch caption content. Status code: {caption_response.status_code}")
-            return None
-            
-        # Parse XML content
-        try:
-            root = ET.fromstring(caption_response.text)
-            transcript_parts = []
-            
-            for text in root.findall('.//text'):
-                if text.text:
-                    transcript_parts.append(text.text.strip())
-            
-            if not transcript_parts:
-                logger.warning("No text content found in captions")
-                return None
-                
-            transcript = ' '.join(transcript_parts)
-            logger.info("Successfully extracted caption text")
-            return transcript
-            
-        except ET.ParseError as e:
-            logger.error(f"Failed to parse caption XML: {str(e)}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error extracting captions: {str(e)}")
-        return None
-
-def check_video_availability(video_id):
-    try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            return True, None
-        else:
-            return False, f"Failed to retrieve video. Status code: {response.status_code}"
-    except Exception as e:
-        return False, f"Failed to check video availability: {str(e)}"
 
 if __name__ == '__main__':
     app.run(debug=True, port=3000)
