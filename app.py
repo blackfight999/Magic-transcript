@@ -15,6 +15,14 @@ import logging
 from pytube import YouTube
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -193,6 +201,74 @@ def get_transcript_youtube_api(video_id):
         logger.error(f"Error in YouTube API method: {str(e)}")
         return None
 
+def get_transcript_selenium(video_id):
+    """Get transcript using Selenium"""
+    try:
+        logger.info("Attempting Selenium transcript method...")
+        
+        # Configure Chrome options
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')  # Run in headless mode
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        
+        # Set up Chrome driver
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        try:
+            # Load video page
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"Loading video page: {url}")
+            driver.get(url)
+            
+            # Wait for and click the more actions button
+            wait = WebDriverWait(driver, 10)
+            more_button = wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "button.ytp-button.ytp-settings-button"))
+            )
+            more_button.click()
+            
+            # Wait for and click the subtitles/CC button
+            subtitles_button = wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".ytp-menuitem[role='menuitem']"))
+            )
+            subtitles_button.click()
+            
+            # Wait for auto-generated subtitles to appear
+            auto_subtitles = wait.until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".ytp-caption-segment"))
+            )
+            
+            # Extract text from subtitles
+            transcript_parts = []
+            for subtitle in auto_subtitles:
+                text = subtitle.get_attribute('innerText').strip()
+                if text:
+                    transcript_parts.append(text)
+            
+            if transcript_parts:
+                transcript = ' '.join(transcript_parts)
+                logger.info("Successfully retrieved transcript using Selenium")
+                return transcript
+            else:
+                logger.warning("No subtitle text found")
+                return None
+                
+        except TimeoutException as e:
+            logger.error(f"Timeout waiting for elements: {str(e)}")
+            return None
+        except NoSuchElementException as e:
+            logger.error(f"Element not found: {str(e)}")
+            return None
+        finally:
+            driver.quit()
+            
+    except Exception as e:
+        logger.error(f"Selenium transcript retrieval failed: {str(e)}")
+        return None
+
 def get_transcript(video_id, lang_code=None):
     """Get transcript using multiple methods"""
     logger.info(f"Starting transcript retrieval for video ID: {video_id}")
@@ -204,12 +280,17 @@ def get_transcript(video_id, lang_code=None):
         return f"Error: {message}"
     
     try:
-        # 1. Try YouTube Data API first
+        # 1. Try Selenium method first (best for auto-generated captions)
+        selenium_transcript = get_transcript_selenium(video_id)
+        if selenium_transcript:
+            return selenium_transcript
+        
+        # 2. Try YouTube Data API
         youtube_api_transcript = get_transcript_youtube_api(video_id)
         if youtube_api_transcript:
             return youtube_api_transcript
             
-        # 2. Try YouTube Transcript API
+        # 3. Try YouTube Transcript API
         try:
             logger.info("Attempting YouTube Transcript API method...")
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -224,13 +305,13 @@ def get_transcript(video_id, lang_code=None):
         except Exception as e:
             logger.error(f"YouTube Transcript API failed: {str(e)}")
         
-        # 3. Try pytube method
+        # 4. Try pytube method
         pytube_transcript = get_transcript_pytube(video_id)
         if pytube_transcript:
             logger.info("Successfully retrieved transcript using pytube")
             return pytube_transcript
         
-        # 4. Try web scraping method as last resort
+        # 5. Try web scraping method as last resort
         logger.info("Attempting web scraping method...")
         alternative_transcript = extract_captions_from_video_page(video_id, lang_code)
         if alternative_transcript:
