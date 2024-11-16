@@ -1,0 +1,29 @@
+# Ignore version control
+.git
+.gitignore
+
+# Ignore environment files
+.env
+.venv
+venv
+
+# Ignore development and local files
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore local configuration
+.DS_Store
+.idea
+.vscode
+
+# Ignore Netlify remnants
+netlify-deploy/
+
+# Ignore logs
+*.log
+
+# Ignore local testing or temporary files
+*.tmp
+*.bak

@@ -63,6 +63,34 @@
         </div>
 
         <div class="error-message" id="error-message"></div>
+
+        <div class="api-key-modal" id="api-key-modal">
+            <div class="modal-content">
+                <h2>Configure AI Service</h2>
+                <div class="service-selection">
+                    <label for="ai-service">Select AI Service:</label>
+                    <select id="ai-service">
+                        <option value="gemini">Google Gemini</option>
+                        <option value="openai">OpenAI ChatGPT</option>
+                        <option value="claude">Anthropic Claude</option>
+                    </select>
+                </div>
+                <div class="api-key-input">
+                    <label for="api-key">API Key:</label>
+                    <input type="password" id="api-key" placeholder="Enter your API key">
+                    <span class="show-password" id="toggle-password">👁️</span>
+                </div>
+                <div class="modal-actions">
+                    <button id="save-api-key">Save API Key</button>
+                    <button id="cancel-api-key">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="ai-service-indicator" id="ai-service-indicator">
+            <span id="current-service-label">No AI Service Selected</span>
+            <button id="change-service-btn">Change</button>
+        </div>
     </main>
 
     <script src="{{ url_for('static', filename='js/script.js') }}"></script>

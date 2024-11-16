@@ -1,0 +1,16 @@
+name: magic-transcript
+region: sfo3
+services:
+  - name: web
+    dockerfile_path: Dockerfile
+    source_dir: .
+    http_port: 5000
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    envs:
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_SECRET_KEY
+        value: your-secret-key-here
+    routes:
+      - path: /

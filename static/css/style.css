@@ -205,6 +205,112 @@ h1 {
     margin-top: 1rem;
 }
 
+.api-key-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+    justify-content: center;
+    align-items: center;
+}
+
+.modal-content {
+    background-color: var(--bg-primary);
+    padding: 30px;
+    border-radius: 10px;
+    width: 90%;
+    max-width: 500px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.modal-content h2 {
+    margin-bottom: 20px;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.service-selection, .api-key-input {
+    margin-bottom: 15px;
+}
+
+.service-selection label, .api-key-input label {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--text-primary);
+}
+
+.service-selection select, .api-key-input input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+}
+
+.api-key-input {
+    position: relative;
+}
+
+.show-password {
+    position: absolute;
+    right: 10px;
+    top: 35px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: space-between;
+}
+
+.modal-actions button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+#save-api-key {
+    background-color: var(--accent-color);
+    color: white;
+}
+
+#cancel-api-key {
+    background-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+.ai-service-indicator {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    background-color: var(--bg-secondary);
+    padding: 10px;
+    border-radius: 5px;
+    margin-top: 15px;
+}
+
+.ai-service-indicator span {
+    color: var(--text-primary);
+    font-weight: bold;
+}
+
+#change-service-btn {
+    background-color: var(--accent-color);
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
 @media (max-width: 768px) {
     h1 {
         font-size: 2.5rem;

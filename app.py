@@ -1,16 +1,82 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, session
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.formatters import TextFormatter
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 from langdetect import detect
 import google.generativeai as genai
+import openai
+import anthropic
 import re
+import os
 
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # For secure session management
 
-# Configure Google Gemini AI
-GOOGLE_API_KEY = 'AIzaSyCGameQtidVffHen8mv61kEHfd_-SXKvkw'
-genai.configure(api_key=GOOGLE_API_KEY)
+def configure_ai_service(service, api_key):
+    """Configure AI service based on the selected provider"""
+    if service == 'gemini':
+        genai.configure(api_key=api_key)
+    elif service == 'openai':
+        openai.api_key = api_key
+    elif service == 'claude':
+        return anthropic.Anthropic(api_key=api_key)
+    return None
+
+def summarize_with_ai(transcript, service, api_key):
+    """Flexible AI summarization based on selected service"""
+    SUMMARY_PROMPT = """Given a text containing complex information about a specific topic, your role is to act as an expert summarizer with 20 years experience.
+
+Start by reading through the provided content to fully understand its scope and depth. Identify the key themes and critical details that are central to the topic.
+
+Next, create a structured summary by organizing these key points in a logical order. Each point should be clear, concise, and reflect the essential information comprehensively. Please aids users in understanding 80% of a video's content by focusing on the most important 20% of the information, simplifying complex ideas into easy-to-understand terms, making learning more accessible and efficient, and breaking down the content into key points.
+
+Present these points in a manner that anyone unfamiliar with the material can grasp the main ideas and significance of the topic effortlessly. To apply this summarization, use bullet points or numbered lists to enhance readability and ensure that each key point stands out for easy comprehension.
+
+The objective is to produce a summary that effectively communicates the core elements of the topic without necessitating a review of the full text.
+
+Here's the text to summarize:
+{transcript}"""
+
+    try:
+        ai_client = configure_ai_service(service, api_key)
+        
+        if service == 'gemini':
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(SUMMARY_PROMPT.format(transcript=transcript))
+            return response.text
+        
+        elif service == 'openai':
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": "You are an expert transcript summarizer with 20 years of experience."},
+                    {"role": "user", "content": SUMMARY_PROMPT.format(transcript=transcript)}
+                ]
+            )
+            return response.choices[0].message.content
+        
+        elif service == 'claude':
+            try:
+                # Try the newer method first
+                response = ai_client.messages.create(
+                    model="claude-2.1",
+                    max_tokens=1000,
+                    messages=[
+                        {"role": "user", "content": SUMMARY_PROMPT.format(transcript=transcript)}
+                    ]
+                )
+                return response.content[0].text
+            except AttributeError:
+                # Fallback to older method if messages attribute doesn't exist
+                response = ai_client.completion.create(
+                    model="claude-2.1",
+                    max_tokens_to_sample=1000,
+                    prompt=SUMMARY_PROMPT.format(transcript=transcript)
+                )
+                return response.completion
+        
+    except Exception as e:
+        return f"Error in AI summarization: {str(e)}"
 
 def extract_video_id(url):
     """Extract YouTube video ID from URL"""
@@ -82,26 +148,34 @@ def get_transcript(video_id, lang_code=None):
     except Exception as e:
         raise Exception(f"Error getting transcript: {str(e)}")
 
-def summarize_with_gemini(transcript):
-    """Summarize transcript using Gemini AI"""
-    try:
-        model = genai.GenerativeModel('gemini-pro')
-        prompt = """You are given a youtube transcript containing complex information about a specific topic, your role is to act as an expert summarizer with 20 years experience.
+@app.route('/set_api_key', methods=['POST'])
+def set_api_key():
+    """Set API key for the selected AI service in the session"""
+    data = request.json
+    service = data.get('service')
+    api_key = data.get('api_key')
+    
+    if not service or not api_key:
+        return jsonify({"error": "Service and API key are required"}), 400
+    
+    session[f'{service}_api_key'] = api_key
+    return jsonify({"message": f"{service.capitalize()} API key set successfully"}), 200
 
-Start by reading through the provided content to fully understand its scope and depth. Identify the key themes and critical details that are central to the topic.
-
-Next, create a structured summary by organizing these key points in a logical order. Each point should be clear, concise, and reflect the essential information comprehensively. Please aids users in understanding 80% of a video's content by focusing on the most important 20% of the information, simplifying complex ideas into easy-to-understand terms, making learning more accessible and efficient, and breaking down the content into key points.
-
-Present these points in a manner that anyone unfamiliar with the material can grasp the main ideas and significance of the topic effortlessly. To apply this summarization, use bullet points or numbered lists to enhance readability and ensure that each key point stands out for easy comprehension.
-
-Here's the transcript to summarize:
-
-""" + transcript
-
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        raise Exception(f"Error in summarization: {str(e)}")
+@app.route('/summarize', methods=['POST'])
+def summarize_transcript():
+    """Summarize transcript using the selected AI service"""
+    data = request.json
+    transcript = data.get('transcript')
+    service = data.get('service', 'gemini')
+    
+    # Retrieve API key from session
+    api_key = session.get(f'{service}_api_key')
+    
+    if not api_key:
+        return jsonify({"error": f"No API key found for {service}. Please set an API key first."}), 401
+    
+    summary = summarize_with_ai(transcript, service, api_key)
+    return jsonify({"summary": summary})
 
 @app.route('/')
 def index():
@@ -134,7 +208,13 @@ def get_transcript_route():
         
         try:
             transcript, detected_language, transcript_language = get_transcript(video_id, lang_code)
-            summary = summarize_with_gemini(transcript)
+            service = request.json.get('service', 'gemini')
+            api_key = session.get(f'{service}_api_key')
+            
+            if not api_key:
+                return jsonify({"error": f"No API key found for {service}. Please set an API key first."}), 401
+            
+            summary = summarize_with_ai(transcript, service, api_key)
             
             return jsonify({
                 'transcript': transcript,
